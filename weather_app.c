@@ -6,7 +6,7 @@
 #include <curl/curl.h>   // HTTP client
 
 struct WEATHER_APP_T {
-    char city[32];
+    char city[64];
     double lat;
     double lon;
     double temperature;
@@ -78,12 +78,6 @@ static int http_get(const char* url, char** out, size_t* out_len) {
     *out_len = CHUNK_T.size;
     return 0;
 }
-
-// === JSON parser: Geoapify ===
-// Extract latitude and longitude from the Geoapify response.
-// Example response (simplified):
-// { "features": [ { "properties": { "lat": 59.3, "lon": 18.0 } } ] }
-
 static int parse_geoapify_json(const char* json_str, double* lat, double* lon) {
     struct json_object* parsed = json_tokener_parse(json_str);
     if (!parsed) return -1;
@@ -94,41 +88,74 @@ static int parse_geoapify_json(const char* json_str, double* lat, double* lon) {
         return -1;
     }
 
-    if (json_object_array_length(features) == 0) {
+    int count = json_object_array_length(features);
+    if (count == 0) {
         json_object_put(parsed);
         return -1; // no results
     }
 
-    struct json_object *first = json_object_array_get_idx(features, 0);
+    if (count == 1) {
+        // --- Exactly one result, auto-select it ---
+        struct json_object *feat = json_object_array_get_idx(features, 0);
+        struct json_object *props;
+        if (json_object_object_get_ex(feat, "properties", &props)) {
+            struct json_object *formatted;
+            if (json_object_object_get_ex(props, "formatted", &formatted)) {
+                printf("\nFound one location: %s\n",
+                       json_object_get_string(formatted));
+            }
 
-    // --- Try "properties.lat" / "properties.lon" ---
-    struct json_object *properties;
-    if (json_object_object_get_ex(first, "properties", &properties)) {
-        struct json_object *jlat, *jlon;
-        if (json_object_object_get_ex(properties, "lat", &jlat) &&
-            json_object_object_get_ex(properties, "lon", &jlon)) {
-            *lat = json_object_get_double(jlat);
-            *lon = json_object_get_double(jlon);
-            json_object_put(parsed);
-            return 0;
+            struct json_object *jlat, *jlon;
+            if (json_object_object_get_ex(props, "lat", &jlat)) {
+                *lat = json_object_get_double(jlat);
+            }
+            if (json_object_object_get_ex(props, "lon", &jlon)) {
+                *lon = json_object_get_double(jlon);
+            }
         }
-    }
+    } else {
+        // --- Multiple results, ask user ---
+        printf("\nMultiple results found:\n");
+        for (int i = 0; i < count; i++) {
+            struct json_object *feat = json_object_array_get_idx(features, i);
+            struct json_object *props;
+            if (json_object_object_get_ex(feat, "properties", &props)) {
+                struct json_object *formatted;
+                if (json_object_object_get_ex(props, "formatted", &formatted)) {
+                    printf("  %d) %s\n", i + 1, json_object_get_string(formatted));
+                }
+            }
+        }
 
-    // --- Fallback: geometry.coordinates [lon, lat] ---
-    struct json_object *geometry;
-    if (json_object_object_get_ex(first, "geometry", &geometry)) {
-        struct json_object *coords;
-        if (json_object_object_get_ex(geometry, "coordinates", &coords) &&
-            json_object_array_length(coords) >= 2) {
-            *lon = json_object_get_double(json_object_array_get_idx(coords, 0));
-            *lat = json_object_get_double(json_object_array_get_idx(coords, 1));
+        // Ask user to pick
+        printf("Select a location [1-%d]: ", count);
+        char input[16];
+        if (!fgets(input, sizeof(input), stdin)) {
             json_object_put(parsed);
-            return 0;
+            return -1;
+        }
+        int choice = atoi(input);
+        if (choice < 1 || choice > count) {
+            fprintf(stderr, "Invalid choice.\n");
+            json_object_put(parsed);
+            return -1;
+        }
+
+        struct json_object *selected = json_object_array_get_idx(features, choice - 1);
+        struct json_object *props;
+        if (json_object_object_get_ex(selected, "properties", &props)) {
+            struct json_object *jlat, *jlon;
+            if (json_object_object_get_ex(props, "lat", &jlat)) {
+                *lat = json_object_get_double(jlat);
+            }
+            if (json_object_object_get_ex(props, "lon", &jlon)) {
+                *lon = json_object_get_double(jlon);
+            }
         }
     }
 
     json_object_put(parsed);
-    return -1; // neither worked
+    return 0;
 }
 
 
@@ -190,11 +217,19 @@ int wa_run(WEATHER_APP_T* app, const char* city_arg) {
     }
 
     // Escape city name for safe URL usage
-    char *escaped_city = curl_easy_escape(curl_easy_init(), app->city, 0);
+    CURL* escaper = curl_easy_init();
+    if (!escaper) {
+	fprintf(stderr, "Failed to init curl for escaping\n");
+    return 2;
+    }
+    char *escaped_city = curl_easy_escape(escaper, app->city, 0);
+    curl_easy_cleanup(escaper);
+
     if (!escaped_city) {
 	fprintf(stderr, "Failed to URL-encode city name\n");
     return 2;
     }
+
 
     char geo_url[256];
     snprintf(geo_url, sizeof geo_url,
