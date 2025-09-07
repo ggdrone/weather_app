@@ -1,5 +1,8 @@
-# WA
+# WA (weather_app)
 Author: Tim Ackevald
-A school project build with help from "tjatte".
+Sep 2025
+
+A school project built with help from "tjatte".
 - Needs libcurl and libcjson
-- Needs apikey from geoapify in your env
+- Needs api-key from geoapify in your env
+- To run ./wa <place/city/cords>
